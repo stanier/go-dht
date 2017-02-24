@@ -1,15 +1,11 @@
 package dht
 
-// #include "dht.go.h"
-// #cgo LDFLAGS: -lrt
-import "C"
-
 import (
 	"bytes"
 	"fmt"
-	"reflect"
 	"time"
-	"unsafe"
+	"errors"
+	"github.com/kidoman/embd"
 )
 
 type SensorType int
@@ -45,25 +41,26 @@ type Pulse struct {
 // Activate sensor and get back bunch of pulses for further decoding.
 // C function call wrapper.
 func dialDHTxxAndGetResponse(pin int, boostPerfFlag bool) ([]Pulse, error) {
-	var arr *C.int32_t
-	var arrLen C.int32_t
-	var list []int32
-	var boost C.int32_t = 0
+	var arr []int
+	var arrLen int
+	var list []int
+	var boost int = 0
 	if boostPerfFlag {
 		boost = 1
 	}
+
 	// Return array: [pulse, duration, pulse, duration, ...]
-	r := C.dial_DHTxx_and_read(C.int32_t(pin), boost, &arr, &arrLen)
-	if r == -1 {
-		err := fmt.Errorf("Error during call C.dial_DHTxx_and_read()")
+	err := dialDHTxxAndRead(int(pin), boost, arr, &arrLen)
+	if err != nil {
+		//err := fmt.Errorf("Error during call C.dial_DHTxx_and_read()")
 		return nil, err
 	}
-	defer C.free(unsafe.Pointer(arr))
+	//defer C.free(unsafe.Pointer(arr))
 	// Convert original C array arr to Go slice list
-	h := (*reflect.SliceHeader)(unsafe.Pointer(&list))
+	/*h := (*reflect.SliceHeader)(unsafe.Pointer(&list))
 	h.Data = uintptr(unsafe.Pointer(arr))
 	h.Len = int(arrLen)
-	h.Cap = int(arrLen)
+	h.Cap = int(arrLen)*/
 	pulses := make([]Pulse, len(list)/2)
 	// Convert original int array ([pulse, duration, pulse, duration, ...])
 	// to Pulse struct array
@@ -254,4 +251,175 @@ func ReadDHTxxWithRetry(sensorType SensorType, pin int, boostPerfFlag bool,
 		}
 		return temp, hum, retried, nil
 	}
+}
+
+func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
+		arr []int, len *int) error {
+	var nextT time.Time
+	var lastT time.Time
+
+	var nextV int
+
+	maxPulseCount := 16000
+	//var values [maxPulseCount * 2]int
+	var values = make([]int, maxPulseCount * 2)
+
+	lastV, err := p.Read()
+	if err != nil {
+		fmt.Println("Failed to read value!")
+		return err
+	}
+
+	k, i := 0, 0
+	values[k*2] = lastV
+
+	lastT = time.Now()
+
+	for {
+		// Because declarations
+		var err error
+
+		nextV, err = p.Read()
+		if err != nil {
+			fmt.Println("Failed to read value!")
+			return err
+		}
+
+		if lastV != nextV {
+			nextT = time.Now()
+			i = 0
+			k++
+
+			if (k > maxPulseCount - 1) {
+				return errors.New(fmt.Sprintf("Pulse count exceed limit in %d\n",
+					maxPulseCount))
+			}
+
+			values[k*2] = nextV
+			values[k*2-1] = int(nextT.UnixNano() - lastT.UnixNano())
+
+			lastV = nextV
+			lastT = nextT
+		}
+
+		if i > 20 {
+			nextT = time.Now()
+
+			if int(nextT.UnixNano() - lastT.UnixNano()) / 1000 > timeoutMsec {
+				values[k*2+1] = timeoutMsec * 1000
+				break
+			}
+		}
+		i++
+	}
+
+	for i = 0; i <= k; i++ {
+		arr[i*2] = values[i*2]
+		arr[i*2+1] = values[i*2+1]
+	}
+	*len = (k+1)*2
+
+	return nil
+}
+
+/* This just blinks an LED.  This is extremely unnecessary in this
+ * 	implementation as 1)  this has no correlation to DHTxx functionality, 2) the
+ *	embd library has a similar function and 3)  it's dead simple to write, why
+ *	would you even need the function already in a library?
+ *
+ *	Regardless, my ranting takes up about as much disk space as this function,
+ *	so it doesn't really hurt to include it in the odd case that someone is
+ *  actually using it
+ */
+func blinkNTimes(pin int, n int) error {
+	if err := embd.InitGPIO(); err != nil { return err }
+	defer embd.CloseGPIO()
+
+	p, err := embd.NewDigitalPin(pin)
+	if err != nil { return err }
+
+	if err := p.SetDirection(embd.Out); err != nil { return err }
+
+	for i := 0; i < n; i++ {
+		if err := p.Write(embd.High); err != nil { return err }
+
+		time.Sleep(100 * time.Millisecond)
+
+		if err := p.Write(embd.Low); err != nil { return err }
+
+		time.Sleep(100 * time.Millisecond)
+	}
+	// Set pin to high
+	if err := p.Write(embd.High); err != nil { return err }
+
+	return nil
+}
+
+// TODO:  Convert all referenced C functions and variables
+func dialDHTxxAndRead(pin int, boostPerfFlag int, arr []int,
+		arr_len *int) error {
+	// TODO:  Transcode function setMaxPriority
+	/*if boostPerfFlag != false; err := setMaxPriority(); err != nil {
+		return -1
+	}*/
+
+	// Initialize the GPIO interface
+	if err := embd.InitGPIO(); err != nil {
+		// TODO:  Transcode function setDefaultPriority
+		//setDefaultPriority()
+		return err
+	}
+    defer embd.CloseGPIO()
+
+	// Open pin
+	p, err := embd.NewDigitalPin(pin)
+	if err != nil {
+		//setDefaultPriority()
+		return err
+	}
+	defer p.Close()
+
+	// Set pin out for dial pulse
+	if err := p.SetDirection(embd.Out); err != nil {
+		//setDefaultPriority()
+		return err
+	}
+
+	// Set pin to high
+	if err := p.Write(embd.High); err != nil {
+		//setDefaultPriority()
+		return err
+	}
+
+	// Sleep 500 milliseconds
+	time.Sleep(500 * time.Millisecond)
+
+	// Set pin to low
+	if err := p.Write(embd.Low); err != nil {
+		//setDefaultPriority()
+		return err
+	}
+
+	// Sleep 18 milliseconds according to DHTxx specification
+	time.Sleep(18 * time.Millisecond)
+
+	// Set pin in to receive dial response
+	if err := p.SetDirection(embd.In); err != nil {
+		//setDefaultPriority()
+		return err
+	}
+
+	// Read data from sensor
+	// TODO:  Transcode function gpioReadSeqUntilTimeout
+	if err := gpioReadSeqUntilTimeout(p, 10, arr, arr_len); err != nil {
+		//setDefaultPriority()
+		return err
+	}
+
+	/*if boostPerfFlag != false; err := setDefaultPriority(); err != nil {
+		setDefaultPriority()
+		return err
+	}*/
+
+	return nil
 }

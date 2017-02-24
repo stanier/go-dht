@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/d2r2/go-dht"
+	".."
 )
 
 func main() {
