@@ -1,11 +1,14 @@
 package dht
 
-import (
+import(
 	"bytes"
 	"fmt"
 	"time"
 	"errors"
 	"github.com/kidoman/embd"
+	"github.com/gavv/monotime"
+	//"unsafe"
+	//"reflect"
 )
 
 type SensorType int
@@ -39,38 +42,40 @@ type Pulse struct {
 }
 
 // Activate sensor and get back bunch of pulses for further decoding.
-// C function call wrapper.
 func dialDHTxxAndGetResponse(pin int, boostPerfFlag bool) ([]Pulse, error) {
 	var arr []int
-	var arrLen int
-	var list []int
+	//var list []int
 	var boost int = 0
 	if boostPerfFlag {
 		boost = 1
 	}
 
 	// Return array: [pulse, duration, pulse, duration, ...]
-	err := dialDHTxxAndRead(int(pin), boost, arr, &arrLen)
+	err := dialDHTxxAndRead(int(pin), boost, &arr)
 	if err != nil {
 		//err := fmt.Errorf("Error during call C.dial_DHTxx_and_read()")
 		return nil, err
 	}
 	//defer C.free(unsafe.Pointer(arr))
 	// Convert original C array arr to Go slice list
-	/*h := (*reflect.SliceHeader)(unsafe.Pointer(&list))
-	h.Data = uintptr(unsafe.Pointer(arr))
-	h.Len = int(arrLen)
-	h.Cap = int(arrLen)*/
-	pulses := make([]Pulse, len(list)/2)
+	//h := (*reflect.SliceHeader)(unsafe.Pointer(&list))
+	//h.Data = uintptr(unsafe.Pointer(arr))
+	//h.Len = int(arrLen)
+	//h.Cap = int(arrLen)
+	//pulses := make([]Pulse, len(list)/2)
+	pulses := make([]Pulse, len(arr)/2)
 	// Convert original int array ([pulse, duration, pulse, duration, ...])
 	// to Pulse struct array
-	for i := 0; i < len(list)/2; i++ {
+	//for i := 0; i < len(list)/2; i++ {
+	for i := 0; i < len(arr)/2; i++ {
 		var value byte = 0
-		if list[i*2] != 0 {
+		//if list[i*2] != 0 {
+		if arr[i*2] != 0 {
 			value = 1
 		}
 		pulses[i] = Pulse{Value: value,
-			Duration: time.Duration(list[i*2+1]) * time.Microsecond}
+			//Duration: time.Duration(list[i*2+1]) * time.Microsecond}
+			Duration: time.Duration(arr[i*2+1]) * time.Microsecond}
 	}
 	return pulses, nil
 }
@@ -254,15 +259,15 @@ func ReadDHTxxWithRetry(sensorType SensorType, pin int, boostPerfFlag bool,
 }
 
 func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
-		arr []int, len *int) error {
-	var nextT time.Time
-	var lastT time.Time
+		arr *[]int) error {
+	var nextT time.Duration
+	var lastT time.Duration
 
 	var nextV int
 
 	maxPulseCount := 16000
 	//var values [maxPulseCount * 2]int
-	var values = make([]int, maxPulseCount * 2)
+	var values = make([]int64, maxPulseCount * 2)
 
 	lastV, err := p.Read()
 	if err != nil {
@@ -271,9 +276,9 @@ func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
 	}
 
 	k, i := 0, 0
-	values[k*2] = lastV
+	values[k*2] = int64(lastV)
 
-	lastT = time.Now()
+	lastT = monotime.Now()
 
 	for {
 		// Because declarations
@@ -286,7 +291,7 @@ func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
 		}
 
 		if lastV != nextV {
-			nextT = time.Now()
+			nextT = monotime.Now()
 			i = 0
 			k++
 
@@ -295,29 +300,30 @@ func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
 					maxPulseCount))
 			}
 
-			values[k*2] = nextV
-			values[k*2-1] = int(nextT.UnixNano() - lastT.UnixNano())
+			values[k*2] = int64(nextV)
+			values[k*2-1] = nextT.Nanoseconds() / int64(1000) - lastT.Nanoseconds() / int64(1000)
 
 			lastV = nextV
 			lastT = nextT
 		}
 
 		if i > 20 {
-			nextT = time.Now()
+			nextT = monotime.Now()
 
-			if int(nextT.UnixNano() - lastT.UnixNano()) / 1000 > timeoutMsec {
-				values[k*2+1] = timeoutMsec * 1000
+			if (nextT.Nanoseconds() / int64(1000) - lastT.Nanoseconds() / int64(1000)) / 1000 > int64(timeoutMsec) {
+				values[k*2+1] = int64(timeoutMsec * 1000)
 				break
 			}
 		}
 		i++
 	}
 
+	(*arr) = make([]int, (k+1)*2)
+
 	for i = 0; i <= k; i++ {
-		arr[i*2] = values[i*2]
-		arr[i*2+1] = values[i*2+1]
+		(*arr)[i*2] = int(values[i*2])
+		(*arr)[i*2+1] = int(values[i*2+1])
 	}
-	*len = (k+1)*2
 
 	return nil
 }
@@ -356,8 +362,7 @@ func blinkNTimes(pin int, n int) error {
 }
 
 // TODO:  Convert all referenced C functions and variables
-func dialDHTxxAndRead(pin int, boostPerfFlag int, arr []int,
-		arr_len *int) error {
+func dialDHTxxAndRead(pin int, boostPerfFlag int, arr *[]int) error {
 	// TODO:  Transcode function setMaxPriority
 	/*if boostPerfFlag != false; err := setMaxPriority(); err != nil {
 		return -1
@@ -411,7 +416,7 @@ func dialDHTxxAndRead(pin int, boostPerfFlag int, arr []int,
 
 	// Read data from sensor
 	// TODO:  Transcode function gpioReadSeqUntilTimeout
-	if err := gpioReadSeqUntilTimeout(p, 10, arr, arr_len); err != nil {
+	if err := gpioReadSeqUntilTimeout(p, 10, arr); err != nil {
 		//setDefaultPriority()
 		return err
 	}
