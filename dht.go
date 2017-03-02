@@ -249,7 +249,7 @@ func ReadDHTxxWithRetry(sensorType SensorType, pin int, boostPerfFlag bool,
 				retry--
 				retried++
 				// Sleep before new attempt
-				time.Sleep(1500 * time.Millisecond)
+				monoSleep(1500 * time.Millisecond)
 				continue
 			}
 			return -1, -1, retried, err
@@ -268,6 +268,12 @@ func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
 	maxPulseCount := 16000
 	//var values [maxPulseCount * 2]int
 	var values = make([]int64, maxPulseCount * 2)
+
+	// Set pin in to receive dial response
+	if err := p.SetDirection(embd.In); err != nil {
+		//setDefaultPriority()
+		return err
+	}
 
 	lastV, err := p.Read()
 	if err != nil {
@@ -292,6 +298,7 @@ func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
 
 		if lastV != nextV {
 			nextT = monotime.Now()
+
 			i = 0
 			k++
 
@@ -307,7 +314,9 @@ func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
 			lastT = nextT
 		}
 
-		if i > 20 {
+		i++
+
+		if i - 1 > 20 {
 			nextT = monotime.Now()
 
 			if (nextT.Nanoseconds() / int64(1000) - lastT.Nanoseconds() / int64(1000)) / 1000 > int64(timeoutMsec) {
@@ -315,7 +324,6 @@ func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
 				break
 			}
 		}
-		i++
 	}
 
 	(*arr) = make([]int, (k+1)*2)
@@ -349,11 +357,11 @@ func blinkNTimes(pin int, n int) error {
 	for i := 0; i < n; i++ {
 		if err := p.Write(embd.High); err != nil { return err }
 
-		time.Sleep(100 * time.Millisecond)
+		monoSleep(100 * time.Millisecond)
 
 		if err := p.Write(embd.Low); err != nil { return err }
 
-		time.Sleep(100 * time.Millisecond)
+		monoSleep(100 * time.Millisecond)
 	}
 	// Set pin to high
 	if err := p.Write(embd.High); err != nil { return err }
@@ -397,7 +405,7 @@ func dialDHTxxAndRead(pin int, boostPerfFlag int, arr *[]int) error {
 	}
 
 	// Sleep 500 milliseconds
-	time.Sleep(500 * time.Millisecond)
+	monoSleep(500 * time.Millisecond)
 
 	// Set pin to low
 	if err := p.Write(embd.Low); err != nil {
@@ -405,14 +413,16 @@ func dialDHTxxAndRead(pin int, boostPerfFlag int, arr *[]int) error {
 		return err
 	}
 
-	// Sleep 18 milliseconds according to DHTxx specification
-	time.Sleep(18 * time.Millisecond)
+	// Sleep 20 milliseconds according to DHTxx specification
+	monoSleep(18 * time.Millisecond)
 
-	// Set pin in to receive dial response
-	if err := p.SetDirection(embd.In); err != nil {
+	// Set pin to low
+	if err := p.Write(embd.High); err != nil {
 		//setDefaultPriority()
 		return err
 	}
+
+	monoSleep(41 * time.Microsecond)
 
 	// Read data from sensor
 	// TODO:  Transcode function gpioReadSeqUntilTimeout
@@ -427,4 +437,19 @@ func dialDHTxxAndRead(pin int, boostPerfFlag int, arr *[]int) error {
 	}*/
 
 	return nil
+}
+
+func monoSleep(duration time.Duration) {
+	d := duration.Nanoseconds()
+
+	start := monotime.Now().Nanoseconds()
+
+	for {
+		diff := monotime.Now().Nanoseconds() - start
+
+		if diff >= d {
+			//fmt.Printf("DIFF: %s\n", diff - d)
+			return
+		}
+	}
 }
