@@ -7,8 +7,6 @@ import(
 	"errors"
 	"github.com/kidoman/embd"
 	"github.com/gavv/monotime"
-	//"unsafe"
-	//"reflect"
 )
 
 type SensorType int
@@ -41,40 +39,33 @@ type Pulse struct {
 	Duration time.Duration
 }
 
+type StampedValue struct {
+	Value 	int
+	Time	time.Duration
+}
+
 // Activate sensor and get back bunch of pulses for further decoding.
 func dialDHTxxAndGetResponse(pin int, boostPerfFlag bool) ([]Pulse, error) {
-	var arr []int
-	//var list []int
 	var boost int = 0
 	if boostPerfFlag {
 		boost = 1
 	}
 
 	// Return array: [pulse, duration, pulse, duration, ...]
-	err := dialDHTxxAndRead(int(pin), boost, &arr)
+	arr, err := dialDHTxxAndRead(int(pin), boost)
 	if err != nil {
-		//err := fmt.Errorf("Error during call C.dial_DHTxx_and_read()")
 		return nil, err
 	}
-	//defer C.free(unsafe.Pointer(arr))
-	// Convert original C array arr to Go slice list
-	//h := (*reflect.SliceHeader)(unsafe.Pointer(&list))
-	//h.Data = uintptr(unsafe.Pointer(arr))
-	//h.Len = int(arrLen)
-	//h.Cap = int(arrLen)
-	//pulses := make([]Pulse, len(list)/2)
+
 	pulses := make([]Pulse, len(arr)/2)
-	// Convert original int array ([pulse, duration, pulse, duration, ...])
-	// to Pulse struct array
-	//for i := 0; i < len(list)/2; i++ {
+
 	for i := 0; i < len(arr)/2; i++ {
 		var value byte = 0
-		//if list[i*2] != 0 {
+
 		if arr[i*2] != 0 {
 			value = 1
 		}
 		pulses[i] = Pulse{Value: value,
-			//Duration: time.Duration(list[i*2+1]) * time.Microsecond}
 			Duration: time.Duration(arr[i*2+1]) * time.Microsecond}
 	}
 	return pulses, nil
@@ -258,7 +249,7 @@ func ReadDHTxxWithRetry(sensorType SensorType, pin int, boostPerfFlag bool,
 	}
 }
 
-func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
+/*func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
 		arr *[]int) error {
 	var nextT time.Duration
 	var lastT time.Duration
@@ -334,6 +325,147 @@ func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int,
 	}
 
 	return nil
+}*/
+
+func gpioReadSeqUntilTimeout(p embd.DigitalPin, timeoutMsec int) ([]int, error) {
+	/* Assuming each iteration takes two microseconds, it should not take more
+	 * 	than 5600 microseconds to gather all 40 bits.  Regardless, we should
+	 *	leave room for error and be rounding up to the next power of two for
+	 *	memory management purposes (and OCD purposes)
+	 */
+	var values = make([]StampedValue, 8192)
+
+    if err := embd.InitGPIO(); err != nil {
+        fmt.Println(err)
+        return nil, err
+    }
+    defer embd.CloseGPIO()
+
+    /*p, err := embd.NewDigitalPin("5")
+    if err != nil {
+        fmt.Println(err)
+        return nil, err
+    }
+    defer p.Close()*/
+
+    if err := p.SetDirection(embd.In); err != nil {
+        fmt.Println(err)
+        return nil, err
+    }
+
+    for i, _ := range(values) {
+        //fmt.Println(monotime.Now().Nanoseconds() - last.Nanoseconds())
+
+        val, err := p.Read()
+		stamp := monotime.Now()
+        if err != nil {
+            fmt.Println(err)
+            return nil, err
+        }
+
+		//fmt.Println(val)
+        values[i] = StampedValue{val, stamp}
+    }
+
+	return sift(values, timeoutMsec)
+}
+
+/*func sift(arr []StampedValue) ([]int64, error) {
+	// Should store no more than roughly 160 values, power of two rounding again
+	var result = make([]int64, 1024)
+	var populated = make([]bool, 512)
+
+	j := 0
+
+	for i, element := range(arr) {
+		fmt.Println(element.Value)
+		if populated[j] == false {
+			result[j*2] = int64(element.Value)
+			result[j*2+1] = int64(0)
+
+			populated[j] = true
+
+			continue
+		}
+
+		if int64(element.Value) == result[j] {
+			result[j*2+1] += element.Time.Nanoseconds() / int64(1000) -
+				arr[i-1].Time.Nanoseconds() / int64(1000)
+
+			continue
+		}
+
+		fmt.Println(result[j*2])
+		j++
+	}
+
+	return result, nil
+}*/
+
+func sift(input []StampedValue, timeoutMsec int) ([]int, error) {
+	var nextT time.Duration
+	var lastT time.Duration
+
+	var nextV int
+
+	j := 0
+
+	maxPulseCount := 32000
+	//var values [maxPulseCount * 2]int
+	var values = make([]int64, maxPulseCount * 2)
+
+	lastV := input[j].Value
+
+	k, i := 0, 0
+	values[k*2] = int64(lastV)
+
+	lastT = input[j].Time
+
+	for {
+		j++
+
+		nextV = input[j].Value
+
+		if lastV != nextV {
+			nextT = input[j].Time
+
+			i = 0
+			k++
+
+			if (k > maxPulseCount - 1) {
+				fmt.Println(k)
+				return nil, errors.New(fmt.Sprintf("Pulse count exceed limit in %d\n",
+					maxPulseCount))
+			}
+
+			values[k*2] = int64(nextV)
+			values[k*2-1] = nextT.Nanoseconds() / int64(1000) - lastT.Nanoseconds() / int64(1000)
+
+			lastV = nextV
+			lastT = nextT
+		}
+
+		i++
+
+		if i - 1 > 20 {
+			//nextT = monotime.Now()
+			nextT= input[i].Time
+
+			if (nextT.Nanoseconds() / int64(1000) - lastT.Nanoseconds() / int64(1000)) / 1000 > int64(timeoutMsec) {
+				values[k*2+1] = int64(timeoutMsec * 1000)
+				break
+			}
+		}
+	}
+
+	arr := make([]int, (k+1)*2)
+
+	for i = 0; i <= k; i++ {
+		arr[i*2] = int(values[i*2])
+		arr[i*2+1] = int(values[i*2+1])
+	}
+
+	return arr, nil
 }
 
 /* This just blinks an LED.  This is extremely unnecessary in this
@@ -370,38 +502,28 @@ func blinkNTimes(pin int, n int) error {
 }
 
 // TODO:  Convert all referenced C functions and variables
-func dialDHTxxAndRead(pin int, boostPerfFlag int, arr *[]int) error {
-	// TODO:  Transcode function setMaxPriority
-	/*if boostPerfFlag != false; err := setMaxPriority(); err != nil {
-		return -1
-	}*/
-
+func dialDHTxxAndRead(pin int, boostPerfFlag int) ([]int, error) {
 	// Initialize the GPIO interface
 	if err := embd.InitGPIO(); err != nil {
-		// TODO:  Transcode function setDefaultPriority
-		//setDefaultPriority()
-		return err
+		return nil, err
 	}
     defer embd.CloseGPIO()
 
 	// Open pin
 	p, err := embd.NewDigitalPin(pin)
 	if err != nil {
-		//setDefaultPriority()
-		return err
+		return nil, err
 	}
 	defer p.Close()
 
 	// Set pin out for dial pulse
 	if err := p.SetDirection(embd.Out); err != nil {
-		//setDefaultPriority()
-		return err
+		return nil, err
 	}
 
 	// Set pin to high
 	if err := p.Write(embd.High); err != nil {
-		//setDefaultPriority()
-		return err
+		return nil, err
 	}
 
 	// Sleep 500 milliseconds
@@ -409,8 +531,7 @@ func dialDHTxxAndRead(pin int, boostPerfFlag int, arr *[]int) error {
 
 	// Set pin to low
 	if err := p.Write(embd.Low); err != nil {
-		//setDefaultPriority()
-		return err
+		return nil, err
 	}
 
 	// Sleep 20 milliseconds according to DHTxx specification
@@ -418,25 +539,18 @@ func dialDHTxxAndRead(pin int, boostPerfFlag int, arr *[]int) error {
 
 	// Set pin to low
 	if err := p.Write(embd.High); err != nil {
-		//setDefaultPriority()
-		return err
+		return nil, err
 	}
 
-	monoSleep(41 * time.Microsecond)
+	monoSleep(40 * time.Microsecond)
 
 	// Read data from sensor
-	// TODO:  Transcode function gpioReadSeqUntilTimeout
-	if err := gpioReadSeqUntilTimeout(p, 10, arr); err != nil {
-		//setDefaultPriority()
-		return err
+	arr, err := gpioReadSeqUntilTimeout(p, 10);
+	if err != nil {
+		return nil, err
 	}
 
-	/*if boostPerfFlag != false; err := setDefaultPriority(); err != nil {
-		setDefaultPriority()
-		return err
-	}*/
-
-	return nil
+	return arr, nil
 }
 
 func monoSleep(duration time.Duration) {
